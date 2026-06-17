@@ -54,9 +54,11 @@ public:
     void set_sequence(Sequence seq) noexcept { sequence_ = seq; }
 
 private:
-    // Intrusive list linkage is owned by PriceLevel; only it should touch
-    // these, hence the friend declaration rather than public accessors.
+    // Intrusive list linkage is owned by PriceLevel; OrderBook reads level_ to
+    // perform O(1) cancellation. Kept private with friendship rather than
+    // public accessors so external code cannot corrupt the linkage.
     friend class PriceLevel;
+    friend class OrderBook;
     Order* prev_ = nullptr;
     Order* next_ = nullptr;
     PriceLevel* level_ = nullptr; // owning level, for O(1) cancel bookkeeping
