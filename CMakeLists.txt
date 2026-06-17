@@ -45,7 +45,8 @@ add_library(obe
     src/PriceLevel.cpp
     src/OrderBook.cpp
     src/MatchingEngine.cpp
-    src/OrderGenerator.cpp)
+    src/OrderGenerator.cpp
+    src/RiskControls.cpp)
 
 target_include_directories(obe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(obe PRIVATE ${OBE_WARNINGS})
