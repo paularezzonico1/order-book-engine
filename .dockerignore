@@ -1,0 +1,12 @@
+# Keep the build context small and avoid copying host build trees into the image.
+build/
+build-*/
+cmake-build-*/
+out/
+bench/results/
+.git/
+.github/
+*.log
+.DS_Store
+perf.data*
+callgrind.out.*
