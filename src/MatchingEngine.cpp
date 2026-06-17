@@ -3,6 +3,11 @@
 namespace obe {
 
 std::size_t MatchingEngine::apply(const Command& cmd) {
+    // Journal the command as received (the event-sourcing record) before it is
+    // processed, so the log is a faithful, replayable input stream.
+    if (log_ && cmd.type != CommandType::Shutdown) {
+        log_->append(cmd);
+    }
     switch (cmd.type) {
         case CommandType::Submit: {
             // Pre-trade risk gate (if installed) runs *before* the book sees

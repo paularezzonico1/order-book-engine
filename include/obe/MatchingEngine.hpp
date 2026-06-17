@@ -1,6 +1,7 @@
 #pragma once
 
 #include "obe/Command.hpp"
+#include "obe/EventLog.hpp"
 #include "obe/OrderBook.hpp"
 #include "obe/RingBuffer.hpp"
 #include "obe/RiskControls.hpp"
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 
 namespace obe {
@@ -51,6 +53,18 @@ public:
     RiskManager* risk() noexcept { return risk_.get(); }
     const RiskManager* risk() const noexcept { return risk_.get(); }
 
+    // Event sourcing: journal every applied command to an append-only log so
+    // the session can be replayed/recovered. Off by default. Logging happens on
+    // the consumer thread (single writer), so there is no contention.
+    void enable_logging(const std::string& path) {
+        log_ = std::make_unique<EventLogWriter>(path);
+    }
+    void flush_log() {
+        if (log_) {
+            log_->flush();
+        }
+    }
+
     // Launch the consumer thread. It runs until it dequeues the shutdown
     // sentinel (see drain_and_join), so shutdown is data-driven and ordered
     // behind every previously-enqueued command — no command can be dropped.
@@ -78,7 +92,8 @@ private:
 
     SpscRingBuffer<Command> queue_;
     OrderBook book_;
-    std::unique_ptr<RiskManager> risk_; // null => risk gate disabled
+    std::unique_ptr<RiskManager> risk_;      // null => risk gate disabled
+    std::unique_ptr<EventLogWriter> log_;    // null => journaling disabled
     std::thread worker_;
 
     // Counters live as atomics: the consumer thread writes them while stats()

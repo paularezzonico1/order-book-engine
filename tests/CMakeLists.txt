@@ -23,6 +23,7 @@ set(OBE_TEST_SOURCES
     test_flat_hash_map.cpp
     test_risk_controls.cpp
     test_concurrency.cpp
+    test_event_log.cpp
     test_stress.cpp)
 
 add_executable(obe_tests ${OBE_TEST_SOURCES})
