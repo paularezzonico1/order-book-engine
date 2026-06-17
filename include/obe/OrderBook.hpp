@@ -39,6 +39,10 @@ public:
                        std::size_t pool_capacity = 4096)
         : stp_(stp), pool_(pool_capacity) {
         trades_.reserve(64);
+        // Pre-size the id index to the expected peak resting-order count. The
+        // profiler showed __do_rehash dominating submit() under load; reserving
+        // up front removes incremental rehashing from the hot path entirely.
+        index_.reserve(pool_capacity);
     }
 
     // Submit a new limit order. Marketable quantity is matched immediately;
