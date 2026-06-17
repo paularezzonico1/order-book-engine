@@ -5,6 +5,18 @@ namespace obe {
 std::size_t MatchingEngine::apply(const Command& cmd) {
     switch (cmd.type) {
         case CommandType::Submit: {
+            // Pre-trade risk gate (if installed) runs *before* the book sees
+            // the order. The collar anchors on the opposite touch — the price
+            // this order would actually trade against.
+            if (risk_) {
+                const std::optional<Price> reference =
+                    cmd.side == Side::Buy ? book_.best_ask() : book_.best_bid();
+                if (risk_->check(cmd.id, cmd.side, cmd.price, cmd.quantity,
+                                 reference) != RejectReason::Accepted) {
+                    ++stats_.commands; // received, but rejected pre-trade
+                    return 0;
+                }
+            }
             const SubmitResult r = book_.submit(cmd.id, cmd.trader, cmd.side,
                                                 cmd.price, cmd.quantity);
             ++stats_.submits;

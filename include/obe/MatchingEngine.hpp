@@ -3,11 +3,14 @@
 #include "obe/Command.hpp"
 #include "obe/OrderBook.hpp"
 #include "obe/RingBuffer.hpp"
+#include "obe/RiskControls.hpp"
 #include "obe/Types.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <thread>
 
 namespace obe {
@@ -39,6 +42,13 @@ public:
     OrderBook& book() noexcept { return book_; }
     const OrderBook& book() const noexcept { return book_; }
 
+    // Install a pre-trade risk gate. Off by default (zero-overhead) so the
+    // perf-sensitive benchmarks measure the matching core in isolation; once
+    // enabled, every inbound submit is risk-checked before reaching the book.
+    void enable_risk(RiskConfig cfg) { risk_ = std::make_unique<RiskManager>(cfg); }
+    RiskManager* risk() noexcept { return risk_.get(); }
+    const RiskManager* risk() const noexcept { return risk_.get(); }
+
     // Launch the consumer thread. The engine runs until stop() drains and joins.
     void start();
     void stop();
@@ -54,6 +64,7 @@ private:
 
     SpscRingBuffer<Command> queue_;
     OrderBook book_;
+    std::unique_ptr<RiskManager> risk_; // null => risk gate disabled
     std::thread worker_;
     std::atomic<bool> running_{false};
     Stats stats_{};
