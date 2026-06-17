@@ -1,96 +1,142 @@
 # Profiling Pass
 
-This documents one end-to-end profiling cycle: **measure → profile → identify a
-hotspot → fix → re-measure**, with before/after numbers.
+A full **measure → profile → fix → re-measure** cycle, performed for real inside
+the project's Docker container with **Valgrind callgrind** (instruction-level
+profiling) plus the benchmark's own wall-clock timing.
+
+> Honesty note: an earlier exploratory pass on macOS used the `sample` profiler
+> and concluded that hash-table *rehashing* "dominated" `submit()`. The
+> instruction-level callgrind data below shows that was **overstated** — rehash
+> is a small fraction of instructions. The fix still helps (it removes
+> latency-spiking rehash bursts, improving the tail and mean wall-clock latency),
+> but the genuinely dominant engine cost is **heap allocation from container
+> nodes**. The numbers and conclusions here are the verified ones.
 
 ## Environment
 
 | | |
 |---|---|
-| CPU | Apple M2 (8 cores) |
-| Compiler | Apple clang 16, `-O3 -DNDEBUG` (Release) |
-| Profiler (local) | `sample` (macOS sampling profiler) |
-| Profiler (Linux) | `valgrind --tool=callgrind` and `perf` — installed in the [Dockerfile](Dockerfile) to reproduce on Linux |
-| Workload | `obe_bench --commands 5000000 --depth 50` (fixed seed) |
+| Host | Docker container (`docker build -t obe . && docker run ...`) |
+| OS / arch | Ubuntu 24.04.4 LTS, aarch64 |
+| Compiler | GCC 13.3.0, profiling build `-O3 -g -DNDEBUG` |
+| Profiler | Valgrind 3.22.0 `--tool=callgrind --cache-sim=no --branch-sim=no` |
+| Wall-clock | `obe_bench` native timing (callgrind distorts absolute time ~50×, so timings are taken *outside* callgrind) |
 
-> On Linux the equivalent capture is:
-> ```sh
-> valgrind --tool=callgrind --callgrind-out-file=callgrind.out ./build/obe_bench --commands 1000000
-> callgrind_annotate callgrind.out | head -40
-> # or, with perf:
-> perf record -g ./build/obe_bench --commands 5000000 && perf report
-> ```
-> macOS lacks `perf`/`valgrind`, so the local capture below used `sample`; the
-> conclusion (and the fix) is profiler-independent.
+`perf` is also installed in the image, but hardware PMU access is not available
+to a container running on a macOS Docker host, so callgrind (which needs no PMU)
+is the tool that was actually used here. On a bare-metal Linux host the same
+capture is available via `perf record -g ./build/obe_bench && perf report`.
 
-## Step 1 — Baseline
+Reproduce:
 
-`obe_bench --csv --commands 5000000 --depth 50`, median of 3 runs:
-
-| metric | value |
-|--------|-------|
-| throughput (SPSC pipeline) | ~4.81 M ops/sec |
-| mean latency | 261.7 ns/command |
-| p50 | 84 ns |
-| p99 | 2834 ns |
-| p99.9 | 4000 ns |
-
-## Step 2 — Profile
-
-Sampling the hot benchmark process (`sample <pid> 3`) gave this dominant stack
-(samples elided for brevity):
-
-```
-1340  obe::MatchingEngine::apply(Command const&)
- 826   obe::OrderBook::submit(...)
- 776     std::__hash_table<...Order*...>::__emplace_unique_key_args(...)   <-- HOT
-  17       std::__hash_table<...>::__do_rehash<true>(unsigned long)        <-- rehashing
- 228     obe::OrderBook::match<std::map<...>>(...)
-  76       std::__hash_table<...>::__erase_unique(...)                     <-- index erase
+```sh
+docker build -t obe .
+docker run --rm obe bash -c '
+  cmake -S . -B build-prof -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+        -DCMAKE_CXX_FLAGS_RELEASE="-O3 -g -DNDEBUG" &&
+  cmake --build build-prof --target obe_bench -j$(nproc) &&
+  valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+           ./build-prof/obe_bench --commands 300000 --depth 50 &&
+  callgrind_annotate --auto=no callgrind.out.* | head -30'
 ```
 
-The single biggest cost in `submit()` was **not** the matching logic or the
-`std::map` price-level tree — it was insertion into `index_`, the
-`unordered_map<OrderId, Order*>` used for `O(1)` cancel lookup. Worse, the
-profile showed `__do_rehash` firing *during* the run: the table was being grown
-and rehashed repeatedly as resting orders accumulated, periodically re-bucketing
-every existing entry. That is wasted work and a source of latency spikes (it
-inflates the p99/p99.9 tail).
+## Step 1 — Profile (identify the hotspot)
 
-## Step 3 — Fix
+callgrind over `obe_bench --commands 300000 --depth 50`, top functions by `Ir`
+(instructions retired). `'2` suffixes are the second thread (the SPSC consumer):
 
-The table's eventual size is bounded by the order pool capacity, which is known
-at construction time. Reserve it up front so the run never rehashes:
+```
+   Ir          %      function
+42,482,533   8.85%   obe::OrderGenerator::make_submit()          <- harness (flow generation)
+42,430,952   8.84%   obe::OrderBook::submit(...)'2
+31,974,664   6.66%   obe::OrderBook::submit(...)
+27,450,028   5.72%   std::chrono::steady_clock::now()            <- harness (latency timing)
+26,483,732   5.52%   obe::MatchingEngine::apply(...)'2
+25,102,325   5.22%   _int_free          ┐
+23,072,397   4.81%   log  (libm)         │  <- harness: exponential/geometric draws
+21,134,924   4.40%   obe::OrderBook::match<map<...greater...>>(...)
+20,587,699   4.29%   obe::OrderGenerator::next()                │
+18,674,730   3.89%   malloc              │
+13,729,806   2.86%   obe::OrderBook::match<map<...less...>>(...) │
+13,354,950   2.78%   _int_malloc         │
+10,912,317   2.27%   operator new('2)    │
+ 8,984,119   1.87%   operator new        ┘
+ 8,419,898   1.75%   std::_Hashtable<...Order*>::_M_erase(...)'2   <- index erase (match/cancel)
+ 8,246,846   1.72%   std::_Hashtable<...Order*>::_M_erase(...)
+```
+
+Two things stand out:
+
+1. **A large share of the profiled binary is the harness, not the engine.**
+   callgrind profiles the *whole process*, so `make_submit`/`next` (≈13%),
+   `log` from the exponential/geometric distributions (≈10%), the Mersenne
+   twister (≈3%), and `steady_clock::now()` (≈6%) all show up. These are
+   command *generation and timing*, not matching.
+
+2. **The dominant engine cost is heap allocation.** Summing the allocator
+   functions — `_int_free` (5.2%), `malloc` (3.9%), `_int_malloc` (2.8%),
+   `operator new` ×2 (4.1%) — gives **≈16% of the entire program** spent in
+   `malloc`/`free`. This traffic comes from the per-node allocation of the
+   `std::map` price-level tree and the `unordered_map` id index — *not* from
+   `Order` objects, which the `MemoryPool` already keeps off the heap.
+
+By contrast, the rehash machinery (`_Prime_rehash_policy::_M_need_rehash`) is
+only **~0.7%** — the macOS `sample` profile had badly over-weighted it.
+
+## Step 2 — Fix
+
+The id index's eventual size is bounded by the order-pool capacity, known at
+construction. Reserving it up front avoids the periodic rehash (each of which
+re-buckets every live node and causes a latency spike):
 
 ```cpp
 // OrderBook constructor
-index_.reserve(pool_capacity);   // remove incremental rehashing from hot path
+index_.reserve(pool_capacity);
 ```
 
 One line, committed in isolation
 (`perf(book): reserve id index to remove hot-path rehashing`).
 
-## Step 4 — Re-measure
+## Step 3 — Re-measure
 
-Same command, median of 3 runs:
+### Instruction count (callgrind, 300k commands)
+
+| | before (no reserve) | after (reserve) | change |
+|---|---:|---:|---:|
+| total `Ir` | 487,429,440 | 480,469,982 | **−1.4%** |
+
+A modest instruction-count win — consistent with rehash being a small fraction
+of instructions.
+
+### Wall-clock latency (native, 5M commands, depth 50, median of 3 runs)
 
 | metric | before | after | change |
 |--------|-------:|------:|-------:|
-| mean latency | 261.7 ns | 234.0 ns | **−10.6%** |
-| p99 | 2834 ns | 2625 ns | **−7.4%** |
-| p99.9 | 4000 ns | 3917 ns | −2.1% |
-| throughput | 4.81 M/s | 4.88 M/s | +1.5% |
+| mean latency | 313.4 ns | 278.0 ns | **−11.3%** |
+| p50 | 166 ns | 125 ns | −24.7% |
+| p99 | 1500 ns | 1375 ns | −8.3% |
+| p99.9 | ~6166 ns (4250–8625) | ~4000 ns (3542–4417) | **≈ −35%** |
+| throughput (SPSC) | ~5.0 M/s | ~4.8 M/s | within run-to-run noise |
 
-Removing the periodic rehash cut mean per-command latency by ~11% and, as
-expected, tightened the tail (the rehash bursts that inflated p99 are gone).
+The interesting result: the instruction count barely moves (−1.4%) but
+wall-clock **mean latency drops ~11% and the p99.9 tail roughly halves**. A
+rehash is rare but, when it fires, it walks and re-buckets the whole table —
+bursting cache and the allocator — so it inflates *tail latency* far more than
+its instruction share suggests. Reserving removes those bursts. Throughput is
+flat within noise (the threaded pipeline is dominated by cross-thread hand-off,
+not by index inserts).
 
-## Remaining hotspot (next candidate)
+**Lesson:** instruction-count profilers (callgrind) and wall-clock measurement
+answer different questions. The hotspot list told us *where the instructions
+go*; only the wall-clock percentiles revealed that the cheap-looking rehash was
+a real tail-latency source.
 
-Even after the fix, `__emplace_unique_key_args` is still the largest single
-cost: each resting order triggers a **node allocation** inside the
-`unordered_map` (one `operator new` per insert, `operator delete` per erase) —
-ironically the very heap traffic the `MemoryPool` was built to eliminate for
-`Order` objects. The natural next step is to back `index_` with a pooled /
-open-addressing hash map (e.g. a flat `robin_hood`/`absl::flat_hash_map`-style
-table) so id indexing is allocation-free too. That is left as a documented
-follow-up rather than pulled in here, to keep the dependency footprint zero.
+## Remaining hotspot (next candidate, now quantified)
+
+The ~16% of the program spent in `malloc`/`free` is the real next target. Each
+resting order allocates a node inside `unordered_map` (`operator new` per
+insert, `_int_free` per erase) and each new price level allocates a `std::map`
+node — exactly the heap traffic the `MemoryPool` eliminated for `Order` objects.
+Backing `index_` (and ideally the price-level map) with a pooled / flat
+open-addressing container would remove most of that 16%. It is left as a
+documented follow-up to keep the dependency footprint at zero.

@@ -175,12 +175,16 @@ price) the tree is trivial and the engine sustains ~12 M ops/s.
 ## Profiling
 
 A full **measure → profile → fix → re-measure** cycle is documented in
-[PROFILING.md](PROFILING.md). Summary: profiling revealed that the
-`unordered_map` id-index was **rehashing during the run**, dominating `submit()`.
-Reserving the table up front (one line) removed the rehash and cut mean latency
-**~11%** with a tighter p99 tail. The write-up also names the next remaining
-hotspot (per-insert node allocation inside the hash map) as a documented
-follow-up.
+[PROFILING.md](PROFILING.md), run for real with **Valgrind callgrind** inside
+the Docker container (GCC 13, Ubuntu 24.04). Summary: callgrind showed the
+engine's dominant cost is **heap allocation from container nodes** (`malloc`/
+`free` ≈ 16% of the program, from the `std::map` tree and `unordered_map` index
+— not from `Order`s, which the pool already keeps off-heap). Reserving the id
+index up front (one line) removes the periodic `unordered_map` rehash; that
+barely moves the instruction count (−1.4% `Ir`) but cuts wall-clock **mean
+latency ~11%** and roughly **halves the p99.9 tail**, because a rehash is a rare
+but expensive burst. The write-up quantifies the remaining heap-allocation
+hotspot (a pooled/flat hash map) as a documented follow-up.
 
 ---
 
