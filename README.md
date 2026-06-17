@@ -3,18 +3,22 @@
 A low-latency **limit order book (LOB) matching engine** in modern C++17.
 
 It implements strict **price-time priority** matching with full/partial fills,
-cancellation, and self-trade prevention; a **free-list memory pool** to keep
-order allocation off the heap on the hot path; and a **lock-free SPSC ring
-buffer** decoupling an order-generator thread from the matching thread. It ships
-with a GoogleTest suite, a throughput/latency benchmark, a parameter-sweep
-script, a profiling write-up, a reproducible Docker build, and CI.
+cancellation, and self-trade prevention; a **free-list memory pool** and an
+**allocation-free open-addressing order index** to keep the hot path off the
+heap; a **lock-free SPSC ring buffer** decoupling an order-generator thread from
+the matching thread; **pre-trade risk controls** (size/notional/fat-finger
+collar/kill switch/duplicate guard); and **event sourcing** — every command is
+journaled to an append-only log and the whole session can be replayed bit-for-
+bit. It ships with a GoogleTest suite (47 tests), a throughput/latency
+benchmark, a parameter sweep, profiling write-ups, a reproducible Docker build,
+and CI that runs the suite under **AddressSanitizer/UBSan and ThreadSanitizer**.
 
 ```
 $ obe_bench --commands 1000000 --depth 20
 --- latency (single-thread, ns/command) ---
-mean   : 134   p50 : 83   p99 : 958   p99.9 : 1375
+mean   : ~88   p50 : 83   p99 : ~417   p99.9 : ~1250
 --- throughput (SPSC pipeline) ---
-ops/sec: ~9.4 million
+ops/sec: ~10.6 million        # after the allocation-free index (see INDEX.md)
 ```
 
 ---
@@ -22,24 +26,25 @@ ops/sec: ~9.4 million
 ## Architecture
 
 ```
-                 producer thread                      consumer thread
-       ┌──────────────────────────┐         ┌─────────────────────────────────┐
-       │      OrderGenerator       │         │          MatchingEngine          │
-       │  (synthetic market flow)  │         │                                  │
-       │                           │         │   pop()    ┌──────────────────┐  │
-       │   next() -> Command  ─────┼──push()─▶│ ─────────▶│     OrderBook    │  │
-       │                           │  lock-   │           │                  │  │
-       └──────────────────────────┘  free    │           │  bids: map<Price,│  │
-                                  SpscRingBuffer<Command> │       PriceLevel> │  │
-                                   (std::atomic head/tail,│  asks: map<Price,│  │
-                                    cache-line padded)    │       PriceLevel> │  │
-                                                          │  index: hash      │  │
-                                                          │       OrderId→*   │  │
-                                                          │  pool: MemoryPool │  │
-                                                          │       <Order>     │  │
-                                                          └──────────────────┘  │
-                                                          └─────────────────────┘
-
+            producer thread                         consumer thread
+   ┌──────────────────────────┐         ┌──────────────────────────────────────┐
+   │      OrderGenerator       │         │            MatchingEngine             │
+   │  (synthetic market flow)  │         │                                       │
+   │                           │ push()  │  pop()  ┌────────────┐  ┌──────────┐  │
+   │  next() -> Command  ──────┼────────▶│ ───────▶│ RiskGate   │─▶│ OrderBook │  │
+   │                           │  lock-  │         │ size/notnl │  │           │  │
+   └──────────────────────────┘  free   │         │ collar/dup │  │ bids/asks │  │
+                          SpscRingBuffer<Command>  │ kill-switch│  │  : map    │  │
+                          (atomic head/tail,       └────────────┘  │ index:    │  │
+                           cache-line padded)            │         │  FlatHash │  │
+                                                         ▼         │ pool:     │  │
+                                                  ┌────────────┐   │  MemPool  │  │
+                                                  │  EventLog   │  └──────────┘  │
+                                                  │ (append-only│                │
+                                                  │  journal)   │   atomic stats │
+                                                  └────────────┘                 │
+                                                  shutdown via Command sentinel  │
+                                                  └────────────────────────────┘
   Each PriceLevel is an intrusive FIFO list of Orders (time priority):
 
      PriceLevel(price=100)
@@ -47,11 +52,14 @@ ops/sec: ~9.4 million
                 (oldest)                  (youngest)
 ```
 
-**Data-flow.** The generator thread fabricates `Command`s (submit/cancel) and
-pushes them across the lock-free queue. The engine thread pops them and applies
-them to the `OrderBook`. The two threads share nothing but the ring buffer, and
-the ring buffer's head/tail indices live on separate cache lines so the producer
-and consumer never fight over a cache line (no false sharing).
+**Data-flow.** The generator thread fabricates `Command`s and pushes them across
+the lock-free queue. The engine thread pops each one, runs it through the
+(optional) pre-trade **risk gate**, journals it to the **event log**, and applies
+it to the `OrderBook`. The two threads share nothing but the ring buffer, whose
+head/tail indices live on separate cache lines (no false sharing). Shutdown is a
+**data-driven sentinel** pushed through the same queue, so the consumer drains
+every prior command before exiting — nothing is dropped. The engine's counters
+are `std::atomic`, so `stats()` is race-free (verified under ThreadSanitizer).
 
 **Matching core.** Inside `OrderBook`:
 
@@ -63,11 +71,23 @@ and consumer never fight over a cache line (no false sharing).
   list directly through the `Order` objects. Append-at-tail and pop-at-head are
   `O(1)`, and because linkage is intrusive, removing an arbitrary order (cancel)
   is an `O(1)` pointer splice — no search, no node allocation.
-* **Id index** — `unordered_map<OrderId, Order*>` so cancel finds its order in
-  `O(1)` average before splicing it out.
+* **Id index** — an **allocation-free open-addressing `FlatHashMap<OrderId,
+  Order*>`** so cancel finds its order in `O(1)` average with zero heap traffic.
+  Replacing `std::unordered_map` here roughly halved mean latency and cut p99 by
+  ~3–4× (see [INDEX.md](INDEX.md)).
 * **Memory pool** — `Order` objects are served from a `MemoryPool<Order>`
   free-list, so a steady-state run performs **zero heap allocations** for
   orders. It is the only component that touches raw allocation.
+
+**Pre-trade risk** ([RiskControls.hpp](include/obe/RiskControls.hpp)): an
+optional gate in front of the book enforcing max order size, max notional, a
+fat-finger price collar, a session duplicate-id guard, and a cross-thread
+**kill switch**, with categorised rejection metrics — modelling the SEC 15c3-5
+market-access checks a real broker must run.
+
+**Event sourcing** ([EVENT_SOURCING.md](EVENT_SOURCING.md)): every applied
+command is appended to a binary journal; a fresh engine replays the journal to
+reconstruct the session **bit-for-bit** (proven by test, not asserted).
 
 See [the design choices](#design-notes) below and the per-file header comments,
 which explain the *why* behind each structure.
@@ -83,12 +103,16 @@ which explain the *why* behind each structure.
 |-----------|------------|-----|
 | **Submit — rest (no match)** | `O(log n)` | Find/create the price level in the RB-tree (`O(log n)`), then `O(1)` FIFO append + `O(1)` avg index insert + `O(1)` pool acquire. |
 | **Submit — match** | `O(k·log n + f)` | Each of the `k` levels consumed is the tree's `begin()`; erasing an emptied level is `O(log n)`. `f` = number of fills produced (each `O(1)`). |
-| **Cancel** | `O(1)` average | `O(1)` index lookup → `O(1)` intrusive splice. Only when the splice empties a level do we pay `O(log n)` to erase that tree node. |
+| **Cancel** | `O(1)` average | `O(1)` flat-hash index lookup → `O(1)` intrusive splice. Only when the splice empties a level do we pay `O(log n)` to erase that tree node. |
+| **Pre-trade risk check** | `O(1)` average | Constant comparisons + one `O(1)` avg duplicate-id set lookup. |
+| **Index find / insert / erase** | `O(1)` average | Open-addressing `FlatHashMap`, linear probing + backward-shift delete; no allocation. |
 | **Best bid / best ask** | `O(1)` | `map::begin()` (cached leftmost in libstdc++/libc++). |
 | **Quantity at a price** | `O(log n)` | One `map::find`; the per-level total is maintained incrementally, so it is not `O(m)`. |
 | **PriceLevel enqueue / dequeue** | `O(1)` | Intrusive list head/tail pointer updates. |
 | **MemoryPool acquire / release** | `O(1)` amortized | Pop/push a free-list node; geometric block growth amortizes the rare `operator new`. |
 | **RingBuffer push / pop** | `O(1)` wait-free | Single atomic load + store with acquire/release ordering; power-of-two mask for wrap. |
+| **Event log append** | `O(1)` | Fixed-width record appended to a buffered stream. |
+| **Snapshot / replay** | `O(orders)` / `O(commands)` | Snapshot walks every resting order once; replay re-applies each journaled command. |
 
 ---
 
@@ -112,6 +136,14 @@ cmake --build build-asan -j
 ctest --test-dir build-asan --output-on-failure
 ```
 
+```sh
+# ThreadSanitizer: verifies the lock-free queue, atomic stats, and shutdown
+# handshake are race-free (cannot be combined with ASan, hence its own tree).
+cmake -S . -B build-tsan -DOBE_TSAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-tsan -j
+ctest --test-dir build-tsan --output-on-failure
+```
+
 ### Docker
 
 ```sh
@@ -124,7 +156,7 @@ docker run --rm obe ./build/obe_bench     # runs the benchmark
 
 ## Tests
 
-`ctest` runs 29 tests across 7 suites:
+`ctest` runs 47 tests across 11 suites:
 
 | Suite | Covers |
 |-------|--------|
@@ -134,6 +166,10 @@ docker run --rm obe ./build/obe_bench     # runs the benchmark
 | `SelfTrade` | `CancelResting`, `CancelAggressing`, and `None` policies |
 | `MemoryPool` | acquire/release, slot reuse, growth, distinctness |
 | `RingBuffer` | FIFO, full/empty edges, power-of-two sizing, **2-thread** run |
+| `FlatHashMap` | basic ops, growth, key-0 validity, **200k-step randomized oracle** vs `unordered_map` |
+| `RiskControls` | size/notional/collar/kill-switch/duplicate limits, metrics, engine integration |
+| `Concurrency` | shutdown-handshake completeness, concurrent `stats()` reads, cross-thread kill switch (run under **TSan**) |
+| `EventLog` | serialization round-trip, **replay == live bit-for-bit** (inline + threaded) |
 | `Stress` | 200k randomized commands; invariants; **threaded == inline** equivalence |
 
 The stress suite is the headline correctness check: it asserts the book is never
@@ -183,8 +219,10 @@ engine's dominant cost is **heap allocation from container nodes** (`malloc`/
 index up front (one line) removes the periodic `unordered_map` rehash; that
 barely moves the instruction count (−1.4% `Ir`) but cuts wall-clock **mean
 latency ~11%** and roughly **halves the p99.9 tail**, because a rehash is a rare
-but expensive burst. The write-up quantifies the remaining heap-allocation
-hotspot (a pooled/flat hash map) as a documented follow-up.
+but expensive burst. The write-up named the remaining heap-allocation hotspot
+(the node-based index) as a follow-up — **since done**: replacing it with an
+allocation-free flat hash map cut mean latency ~48% and p99 ~78%, with the full
+evaluation and callgrind evidence (malloc share 16% → ~2%) in [INDEX.md](INDEX.md).
 
 ---
 
@@ -207,21 +245,26 @@ hotspot (a pooled/flat hash map) as a documented follow-up.
 
 ```
 include/obe/     public headers (one component each, heavily commented)
-  Types.hpp        domain primitives (Price, Side, STP policy)
-  Order.hpp        order = intrusive FIFO node
+  Types.hpp        domain primitives (Price, Side, OrderType, STP policy)
+  Order.hpp        order = intrusive FIFO node; OrderSnapshot
   PriceLevel.hpp   O(1) intrusive FIFO queue at one price
-  OrderBook.hpp    the matching book (RB-trees + index + pool)
+  OrderBook.hpp    the matching book (RB-trees + flat-hash index + pool)
   Trade.hpp        execution report / submit result types
-  Command.hpp      producer→consumer message
+  Command.hpp      producer→consumer message (+ shutdown sentinel)
   MemoryPool.hpp   free-list allocator
   RingBuffer.hpp   lock-free SPSC queue
-  MatchingEngine.hpp  consumer thread + book
+  FlatHashMap.hpp  allocation-free open-addressing order index
+  RiskControls.hpp pre-trade risk gate + metrics + kill switch
+  EventLog.hpp     append-only command journal + replay
+  MatchingEngine.hpp  consumer thread + book + risk + journal
   OrderGenerator.hpp  synthetic flow
 src/             out-of-line implementations
 tests/           GoogleTest suites (one file per category)
 bench/           benchmark.cpp + sweep.sh
 Dockerfile       reproducible Linux build/test/profile image
-.github/workflows/ci.yml   Release tests + ASan/UBSan on every push
+.github/workflows/ci.yml   Release tests + ASan/UBSan + ThreadSanitizer
 SYNTHETIC_DATA.md  how the order generator models market flow
 PROFILING.md       the profiling pass with before/after numbers
+INDEX.md           order-index redesign: slot-table vs flat-hash + measurements
+EVENT_SOURCING.md  the binary journal format and replay proof
 ```
