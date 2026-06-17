@@ -50,6 +50,31 @@ inline std::ostream& operator<<(std::ostream& os, Side s) {
 }
 
 // ---------------------------------------------------------------------------
+// Order type / time-in-force
+// ---------------------------------------------------------------------------
+// Limit  — rest any unmatched remainder on the book (the default).
+// IOC    — Immediate-Or-Cancel: match what is available now, cancel the rest.
+// FOK    — Fill-Or-Kill: fill the entire quantity immediately or do nothing.
+// Stop   — parked until a trigger price is touched, then fires as a market
+//          order (an IOC priced to sweep the book).
+enum class OrderType : std::uint8_t {
+    Limit = 0,
+    IOC = 1,
+    FOK = 2,
+    Stop = 3,
+};
+
+inline const char* to_string(OrderType t) noexcept {
+    switch (t) {
+        case OrderType::Limit: return "LIMIT";
+        case OrderType::IOC: return "IOC";
+        case OrderType::FOK: return "FOK";
+        case OrderType::Stop: return "STOP";
+    }
+    return "?";
+}
+
+// ---------------------------------------------------------------------------
 // Self-trade prevention policy
 // ---------------------------------------------------------------------------
 // When an aggressing order would match a resting order from the same trader,

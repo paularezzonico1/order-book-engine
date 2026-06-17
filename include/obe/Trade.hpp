@@ -32,6 +32,9 @@ enum class SubmitStatus : std::uint8_t {
     PartiallyFilled,   // matched some, remainder rested
     CancelledBySelfTrade, // STP=CancelAggressing removed the remainder
     Rejected,          // invalid (e.g. zero quantity, duplicate id)
+    Cancelled,         // IOC: unfilled remainder cancelled (incl. zero-fill)
+    Killed,            // FOK: could not fill in full, nothing was done
+    StopAccepted,      // Stop: parked on the book awaiting its trigger price
 };
 
 struct SubmitResult {
