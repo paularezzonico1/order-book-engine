@@ -75,7 +75,7 @@ SubmitResult OrderBook::submit(OrderId id, TraderId trader, Side side,
     SubmitResult res;
 
     // Reject malformed or duplicate orders rather than corrupting the book.
-    if (quantity == 0 || index_.find(id) != index_.end()) {
+    if (quantity == 0 || index_.contains(id)) {
         res.status = SubmitStatus::Rejected;
         return res;
     }
@@ -112,7 +112,7 @@ SubmitResult OrderBook::submit(OrderId id, TraderId trader, Side side,
             auto [it, _] = asks_.try_emplace(price, price);
             it->second.enqueue(order);
         }
-        index_.emplace(id, order);
+        index_.insert(id, order);
 
         res.resting = remaining;
         res.status = res.filled > 0 ? SubmitStatus::PartiallyFilled
@@ -128,12 +128,12 @@ SubmitResult OrderBook::submit(OrderId id, TraderId trader, Side side,
 // cancel — O(1) splice via the order's back-pointer to its level
 // ---------------------------------------------------------------------------
 bool OrderBook::cancel(OrderId id) {
-    auto it = index_.find(id);
-    if (it == index_.end()) {
+    Order** slot = index_.find(id);
+    if (slot == nullptr) {
         return false;
     }
-    Order* order = it->second;
-    index_.erase(it);
+    Order* order = *slot;
+    index_.erase(id);
 
     PriceLevel* level = order->level_;
     const Price level_price = level->price();

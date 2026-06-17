@@ -1,5 +1,6 @@
 #pragma once
 
+#include "obe/FlatHashMap.hpp"
 #include "obe/MemoryPool.hpp"
 #include "obe/Order.hpp"
 #include "obe/PriceLevel.hpp"
@@ -10,7 +11,6 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
 namespace obe {
@@ -26,8 +26,10 @@ namespace obe {
 //     price level and, crucially, an *ordered* iterator so begin() is always
 //     the best price. Comparators are flipped per side so begin() is the
 //     side's most aggressive price in both cases.
-//   * index_ : unordered_map<OrderId, Order*> — O(1) average lookup so cancel
-//     can find an order without scanning, then splice it out in O(1).
+//   * index_ : FlatHashMap<OrderId, Order*> — O(1) average lookup so cancel
+//     can find an order without scanning, then splice it out in O(1). This is
+//     an open-addressing, allocation-free table (see FlatHashMap.hpp / INDEX.md)
+//     chosen over std::unordered_map to keep order indexing off the heap.
 //   * pool_  : MemoryPool<Order> — Order objects for resting orders come from
 //     here, never from the global allocator.
 //
@@ -91,7 +93,7 @@ private:
 
     std::map<Price, PriceLevel, std::greater<Price>> bids_;
     std::map<Price, PriceLevel, std::less<Price>> asks_;
-    std::unordered_map<OrderId, Order*> index_;
+    FlatHashMap<OrderId, Order*> index_;
 
     Sequence next_seq_ = 1;
     std::vector<Trade> trades_; // reused buffer; cleared each submit()
