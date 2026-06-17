@@ -20,12 +20,12 @@ class MatchingEngine; // forward decl for replay()
 // the system crash-recoverable is the input stream. This is the event-sourcing
 // model: journal every Command, and reconstruct state by replaying the journal.
 //
-// On-disk format (little-endian-on-disk assumes a same-endian reader; documented
-// in EVENT_SOURCING.md):
+// On-disk format (integers in host byte order — read on the same architecture;
+// fully specified in EVENT_SOURCING.md):
 //   * 8-byte header: magic "OBEL" + uint32 version
 //   * then fixed-width 40-byte records, one per Command, in apply order.
 // Fixed-width records mean replay never has to parse variable framing and the
-// file offset of event N is trivially computable.
+// file offset of event N is trivially computable (8 + N*40).
 class EventLogWriter {
 public:
     static constexpr char kMagic[4] = {'O', 'B', 'E', 'L'};
@@ -55,7 +55,13 @@ private:
 std::vector<Command> read_event_log(const std::string& path);
 
 // Replay a recorded command stream into an engine, reconstructing its state.
-// The engine must be fresh and must not itself have logging enabled.
+//
+// The engine must be fresh and must NOT itself have logging enabled (else it
+// would re-journal the replayed events). To reproduce the original state
+// bit-for-bit, the replay engine must be configured identically to the live
+// one: same self-trade policy (an OrderBook constructor argument) and, if the
+// live run used a risk gate, the same RiskConfig — because rejected orders are
+// journaled too and must be re-rejected identically on replay.
 void replay(const std::vector<Command>& events, MatchingEngine& engine);
 
 // Convenience: read `path` and replay it into `engine`.

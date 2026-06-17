@@ -9,7 +9,7 @@ heap; a **lock-free SPSC ring buffer** decoupling an order-generator thread from
 the matching thread; **pre-trade risk controls** (size/notional/fat-finger
 collar/kill switch/duplicate guard); and **event sourcing** — every command is
 journaled to an append-only log and the whole session can be replayed bit-for-
-bit. It ships with a GoogleTest suite (47 tests), a throughput/latency
+bit. It ships with a GoogleTest suite (58 tests), a throughput/latency
 benchmark, a parameter sweep, profiling write-ups, a reproducible Docker build,
 and CI that runs the suite under **AddressSanitizer/UBSan and ThreadSanitizer**.
 
@@ -156,7 +156,7 @@ docker run --rm obe ./build/obe_bench     # runs the benchmark
 
 ## Tests
 
-`ctest` runs 47 tests across 11 suites:
+`ctest` runs 58 tests across 11 suites:
 
 | Suite | Covers |
 |-------|--------|
@@ -169,7 +169,7 @@ docker run --rm obe ./build/obe_bench     # runs the benchmark
 | `FlatHashMap` | basic ops, growth, key-0 validity, **200k-step randomized oracle** vs `unordered_map` |
 | `RiskControls` | size/notional/collar/kill-switch/duplicate limits, metrics, engine integration |
 | `Concurrency` | shutdown-handshake completeness, concurrent `stats()` reads, cross-thread kill switch (run under **TSan**) |
-| `EventLog` | serialization round-trip, **replay == live bit-for-bit** (inline + threaded) |
+| `EventLog` | serialization round-trip, sentinel-never-journaled, malformed/truncated logs, **replay == live bit-for-bit** across cancels / partial fills / STP / rejected-risk / multi-seed stress (inline + threaded) |
 | `Stress` | 200k randomized commands; invariants; **threaded == inline** equivalence |
 
 The stress suite is the headline correctness check: it asserts the book is never
@@ -223,6 +223,31 @@ but expensive burst. The write-up named the remaining heap-allocation hotspot
 (the node-based index) as a follow-up — **since done**: replacing it with an
 allocation-free flat hash map cut mean latency ~48% and p99 ~78%, with the full
 evaluation and callgrind evidence (malloc share 16% → ~2%) in [INDEX.md](INDEX.md).
+
+---
+
+## Event sourcing & replay
+
+The engine is deterministic, so the only thing needed to recover or audit a
+session is its **input stream**. `MatchingEngine::enable_logging(path)` journals
+every applied command to an **append-only binary log** (8-byte versioned header +
+fixed-width 40-byte records). `replay_log(path, engine)` feeds those commands
+back into a fresh engine and reconstructs the book **bit-for-bit** — same resting
+orders, FIFO order, sequence numbers, and trade counts.
+
+```cpp
+MatchingEngine live;  live.enable_logging("session.bin");
+/* ... run the session ... */            live.flush_log();
+
+MatchingEngine recovered;                 // same SelfTradePolicy / RiskConfig
+replay_log("session.bin", recovered);     // recovered.book() == live.book()
+```
+
+`tests/test_event_log.cpp` *proves* equivalence (via `OrderBook::snapshot()`)
+across cancellations, partial fills, self-trade prevention, and rejected risk
+orders, plus a multi-seed generator stress run, and covers malformed/truncated
+logs. **Crash-safety caveats** (no `fsync`; host-endian format; torn-tail
+recovery) are documented honestly in [EVENT_SOURCING.md](EVENT_SOURCING.md).
 
 ---
 

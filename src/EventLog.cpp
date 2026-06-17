@@ -52,6 +52,12 @@ EventLogWriter::EventLogWriter(const std::string& path)
 }
 
 void EventLogWriter::append(const Command& cmd) {
+    // The shutdown sentinel is control-plane, never a domain event. Drop it
+    // defensively so a log can never contain — and thus never replay — one,
+    // regardless of what the caller passes.
+    if (cmd.type == CommandType::Shutdown) {
+        return;
+    }
     char buf[kRecordSize];
     encode(cmd, buf);
     out_.write(buf, kRecordSize);
@@ -84,6 +90,11 @@ std::vector<Command> read_event_log(const std::string& path) {
         throw std::runtime_error("read_event_log: unsupported version");
     }
 
+    // Read complete fixed-width records. If the final record is torn (a writer
+    // crash mid-append), the last read() comes up short and the loop stops,
+    // dropping the partial record. That is the intended crash-recovery
+    // semantics: a command that was not durably written is treated as never
+    // having happened, leaving a consistent prefix of the stream.
     std::vector<Command> events;
     char buf[EventLogWriter::kRecordSize];
     while (in.read(buf, EventLogWriter::kRecordSize)) {
