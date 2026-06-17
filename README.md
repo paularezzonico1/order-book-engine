@@ -1,6 +1,17 @@
 # order-book-engine
 
-A low-latency **limit order book (LOB) matching engine** in modern C++17.
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![build](https://img.shields.io/badge/build-CMake-informational.svg)
+![tests](https://img.shields.io/badge/tests-58%20passing-brightgreen.svg)
+![sanitizers](https://img.shields.io/badge/ASan%20%7C%20UBSan%20%7C%20TSan-clean-brightgreen.svg)
+![license](https://img.shields.io/badge/license-MIT-green.svg)
+
+A low-latency **limit order book (LOB) matching engine** in modern C++17, built
+to production-systems standards: a **lock-free threading pipeline**, an
+**allocation-free hot path**, **pre-trade risk controls**, **deterministic
+event-sourced replay**, and a **profiling-driven optimization** pass with
+measured before/after numbers — all backed by 58 tests run under three
+sanitizers.
 
 It implements strict **price-time priority** matching with full/partial fills,
 cancellation, and self-trade prevention; a **free-list memory pool** and an
@@ -20,6 +31,33 @@ mean   : ~88   p50 : 83   p99 : ~417   p99.9 : ~1250
 --- throughput (SPSC pipeline) ---
 ops/sec: ~10.6 million        # after the allocation-free index (see INDEX.md)
 ```
+
+## Highlights
+
+- **Lock-free SPSC pipeline** decoupling order intake from matching — proven
+  **data-race-free under ThreadSanitizer**, with a data-driven shutdown
+  handshake that drops nothing.
+- **Allocation-free hot path** — a free-list `Order` pool + an open-addressing
+  index mean steady-state matching does **zero heap allocation**.
+- **Profiling-driven optimization** — Valgrind/callgrind pinpointed the
+  heap-allocation hotspot; replacing the node-based index cut **mean latency
+  ~48% and p99 ~78%** (measured before/after, [INDEX.md](INDEX.md)).
+- **Strict price-time priority** matching — full/partial fills, cancels, and
+  self-trade prevention; **O(1) cancel** via an intrusive FIFO.
+- **Pre-trade risk gate** — size / notional / fat-finger collar / kill switch /
+  duplicate guard, modelling the SEC 15c3-5 market-access rule.
+- **Deterministic event sourcing** — append-only journal + **bit-for-bit
+  replay**, proven by test ([EVENT_SOURCING.md](EVENT_SOURCING.md)).
+- **~10.6M orders/sec** through the pipeline (higher on shallower books),
+  **~83ns** p50 single-thread latency.
+- **58 tests** (incl. a randomized oracle and high-volume stress) green under
+  **Release, ASan/UBSan, and TSan**; reproducible **Docker** build; **GitHub
+  Actions CI**.
+
+**What it demonstrates:** systems C++ (RAII, custom allocators, intrusive data
+structures), lock-free concurrency and the C++ memory model, data-structure
+selection under real cache/allocation constraints, performance engineering with
+evidence, and trading-domain awareness (risk, recovery, determinism).
 
 ---
 
@@ -293,3 +331,21 @@ PROFILING.md       the profiling pass with before/after numbers
 INDEX.md           order-index redesign: slot-table vs flat-hash + measurements
 EVENT_SOURCING.md  the binary journal format and replay proof
 ```
+
+---
+
+## Scope & honest limitations
+
+This is a single-instrument matching **core**, not a full venue. Deliberately
+out of scope (and where a production system would go next): a tick-indexed flat
+price-level array to replace the `std::map` tree (the remaining ~2% allocation
+hotspot in [PROFILING.md](PROFILING.md)); additional order types (the log format
+already reserves `order_type`/`trigger_price` fields, but the engine matches all
+orders as limit today); an MPSC gateway for many sessions; durable `fsync`/CRC'd
+journaling (the log is not crash-safe against power loss — see
+[EVENT_SOURCING.md](EVENT_SOURCING.md)); and a network/FIX gateway. These are
+called out rather than hidden.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
