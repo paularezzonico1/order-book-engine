@@ -83,6 +83,15 @@ public:
     // from the order's remaining) so the level aggregate stays consistent.
     void on_fill(Quantity traded) noexcept { total_qty_ -= traded; }
 
+    // Walk the FIFO queue oldest-first (time-priority order). Used to build a
+    // deterministic book snapshot for replay verification.
+    template <typename F>
+    void for_each(F&& fn) const {
+        for (const Order* o = head_; o != nullptr; o = o->next_) {
+            fn(o);
+        }
+    }
+
 private:
     Price price_;
     Order* head_ = nullptr; // oldest — trades first

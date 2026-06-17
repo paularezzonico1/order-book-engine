@@ -69,6 +69,12 @@ public:
     // Trades produced by the most recent submit().
     const std::vector<Trade>& last_trades() const noexcept { return trades_; }
 
+    // A deterministic, fully-ordered description of every resting order: bids
+    // (best price first) then asks, each level in FIFO/time-priority order.
+    // Two books with identical snapshots are bit-for-bit equal in resting
+    // state — the basis for proving replay reconstructs the live book exactly.
+    std::vector<OrderSnapshot> snapshot() const;
+
     // Pool introspection (tests assert no Order leaks).
     const MemoryPool<Order>& pool() const noexcept { return pool_; }
 

@@ -171,6 +171,28 @@ std::optional<Price> OrderBook::best_ask() const {
     return asks_.begin()->first;
 }
 
+std::vector<OrderSnapshot> OrderBook::snapshot() const {
+    std::vector<OrderSnapshot> out;
+    out.reserve(index_.size());
+    // Bids first (best price first via the map's ordering), then asks; within a
+    // level, FIFO order. This traversal is fully deterministic.
+    for (const auto& kv : bids_) {
+        const Price price = kv.first;
+        kv.second.for_each([&](const Order* o) {
+            out.push_back(OrderSnapshot{Side::Buy, price, o->id(),
+                                        o->remaining(), o->sequence()});
+        });
+    }
+    for (const auto& kv : asks_) {
+        const Price price = kv.first;
+        kv.second.for_each([&](const Order* o) {
+            out.push_back(OrderSnapshot{Side::Sell, price, o->id(),
+                                        o->remaining(), o->sequence()});
+        });
+    }
+    return out;
+}
+
 Quantity OrderBook::quantity_at(Side side, Price price) const {
     if (side == Side::Buy) {
         auto it = bids_.find(price);

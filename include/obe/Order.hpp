@@ -72,4 +72,22 @@ private:
     Sequence sequence_ = 0;
 };
 
+// A value-type snapshot of one resting order's externally-meaningful state.
+// Used to compare two books for bit-for-bit equality (e.g. live vs. replayed).
+struct OrderSnapshot {
+    Side side = Side::Buy;
+    Price price = 0;
+    OrderId id = 0;
+    Quantity remaining = 0;
+    Sequence sequence = 0;
+
+    bool operator==(const OrderSnapshot& o) const noexcept {
+        return side == o.side && price == o.price && id == o.id &&
+               remaining == o.remaining && sequence == o.sequence;
+    }
+    bool operator!=(const OrderSnapshot& o) const noexcept {
+        return !(*this == o);
+    }
+};
+
 } // namespace obe
