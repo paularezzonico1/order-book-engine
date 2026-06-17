@@ -20,6 +20,7 @@ set(OBE_TEST_SOURCES
     test_self_trade.cpp
     test_memory_pool.cpp
     test_ring_buffer.cpp
+    test_flat_hash_map.cpp
     test_risk_controls.cpp
     test_concurrency.cpp
     test_stress.cpp)
