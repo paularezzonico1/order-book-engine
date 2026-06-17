@@ -54,7 +54,15 @@ target_compile_options(obe PRIVATE ${OBE_WARNINGS})
 find_package(Threads REQUIRED)
 target_link_libraries(obe PUBLIC Threads::Threads)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+# ThreadSanitizer is a separate, opt-in configuration (it cannot be combined
+# with AddressSanitizer). Use it to verify the lock-free queue + engine shutdown
+# are free of data races:  cmake -B build-tsan -DOBE_TSAN=ON && ctest ...
+option(OBE_TSAN "Build with ThreadSanitizer" OFF)
+if(OBE_TSAN)
+    set(OBE_TSAN_FLAGS -fsanitize=thread -O1 -g -fno-omit-frame-pointer)
+    target_compile_options(obe PUBLIC ${OBE_TSAN_FLAGS})
+    target_link_options(obe PUBLIC ${OBE_TSAN_FLAGS})
+elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(obe PUBLIC ${OBE_SANITIZER_FLAGS})
     target_link_options(obe PUBLIC ${OBE_SANITIZER_FLAGS})
 endif()

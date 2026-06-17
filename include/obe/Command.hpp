@@ -15,6 +15,7 @@ namespace obe {
 enum class CommandType : std::uint8_t {
     Submit = 0,
     Cancel = 1,
+    Shutdown = 2, // sentinel: tells the consumer to drain-and-exit (not logged)
 };
 
 struct Command {
@@ -69,6 +70,12 @@ struct Command {
         Command c;
         c.type = CommandType::Cancel;
         c.id = id;
+        return c;
+    }
+
+    static Command make_shutdown() noexcept {
+        Command c;
+        c.type = CommandType::Shutdown;
         return c;
     }
 };

@@ -144,7 +144,7 @@ double measure_throughput(const std::vector<Command>& cmds, const Options& o) {
         }
     });
     producer.join();
-    engine.stop(); // drains the queue then joins
+    engine.drain_and_join(); // sentinel handshake: drains the queue then joins
     const auto t1 = Clock::now();
 
     const double secs = std::chrono::duration<double>(t1 - t0).count();

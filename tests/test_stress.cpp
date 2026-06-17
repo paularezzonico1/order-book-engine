@@ -71,7 +71,7 @@ TEST(Stress, ThreadedPipelineMatchesInlineExecution) {
         }
     });
     producer.join();
-    piped.stop();
+    piped.drain_and_join();
 
     // Identical inputs in identical order => identical outcome.
     EXPECT_EQ(piped.stats().commands, inlined.stats().commands);

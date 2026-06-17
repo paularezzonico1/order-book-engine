@@ -26,6 +26,8 @@ namespace obe {
 // the cross-thread hand-off in isolation from the matching cost.
 class MatchingEngine {
 public:
+    // Copyable, plain snapshot returned by stats(). The live counters behind it
+    // are atomics (see below) so this read is race-free even mid-run.
     struct Stats {
         std::uint64_t commands = 0;
         std::uint64_t submits = 0;
@@ -49,11 +51,23 @@ public:
     RiskManager* risk() noexcept { return risk_.get(); }
     const RiskManager* risk() const noexcept { return risk_.get(); }
 
-    // Launch the consumer thread. The engine runs until stop() drains and joins.
+    // Launch the consumer thread. It runs until it dequeues the shutdown
+    // sentinel (see drain_and_join), so shutdown is data-driven and ordered
+    // behind every previously-enqueued command — no command can be dropped.
     void start();
-    void stop();
 
-    Stats stats() const noexcept { return stats_; }
+    // Enqueue the shutdown sentinel and join the consumer. Contract: the
+    // producer must have finished pushing (no other thread is concurrently
+    // pushing) — typically called right after the producer thread is joined.
+    // This is the clean producer-complete handshake that replaces the old
+    // running-flag race.
+    void drain_and_join();
+
+    // Join without enqueuing a sentinel (for callers that pushed their own).
+    void join();
+
+    // Race-free snapshot of the counters (atomic loads under the hood).
+    Stats stats() const noexcept;
 
     // Apply a single command inline (used by single-threaded benchmarks/tests
     // that bypass the queue). Returns the number of trades it produced.
@@ -66,8 +80,14 @@ private:
     OrderBook book_;
     std::unique_ptr<RiskManager> risk_; // null => risk gate disabled
     std::thread worker_;
-    std::atomic<bool> running_{false};
-    Stats stats_{};
+
+    // Counters live as atomics: the consumer thread writes them while stats()
+    // may read them from another thread. Relaxed ordering suffices — they are
+    // independent tallies with nothing else to order against.
+    std::atomic<std::uint64_t> commands_{0};
+    std::atomic<std::uint64_t> submits_{0};
+    std::atomic<std::uint64_t> cancels_{0};
+    std::atomic<std::uint64_t> trades_{0};
 };
 
 } // namespace obe

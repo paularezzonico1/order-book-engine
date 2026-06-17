@@ -13,52 +13,72 @@ std::size_t MatchingEngine::apply(const Command& cmd) {
                     cmd.side == Side::Buy ? book_.best_ask() : book_.best_bid();
                 if (risk_->check(cmd.id, cmd.side, cmd.price, cmd.quantity,
                                  reference) != RejectReason::Accepted) {
-                    ++stats_.commands; // received, but rejected pre-trade
-                    return 0;
+                    commands_.fetch_add(1, std::memory_order_relaxed);
+                    return 0; // received, but rejected pre-trade
                 }
             }
             const SubmitResult r = book_.submit(cmd.id, cmd.trader, cmd.side,
                                                 cmd.price, cmd.quantity);
-            ++stats_.submits;
-            stats_.trades += r.trade_count;
-            ++stats_.commands;
+            submits_.fetch_add(1, std::memory_order_relaxed);
+            trades_.fetch_add(r.trade_count, std::memory_order_relaxed);
+            commands_.fetch_add(1, std::memory_order_relaxed);
             return r.trade_count;
         }
         case CommandType::Cancel:
             book_.cancel(cmd.id);
-            ++stats_.cancels;
-            ++stats_.commands;
+            cancels_.fetch_add(1, std::memory_order_relaxed);
+            commands_.fetch_add(1, std::memory_order_relaxed);
             return 0;
+        case CommandType::Shutdown:
+            return 0; // handled by consume_loop; a no-op if applied inline
     }
     return 0;
 }
 
+MatchingEngine::Stats MatchingEngine::stats() const noexcept {
+    Stats s;
+    s.commands = commands_.load(std::memory_order_relaxed);
+    s.submits = submits_.load(std::memory_order_relaxed);
+    s.cancels = cancels_.load(std::memory_order_relaxed);
+    s.trades = trades_.load(std::memory_order_relaxed);
+    return s;
+}
+
 void MatchingEngine::consume_loop() {
     Command cmd;
-    // Run while requested, and after a stop request keep draining until the
-    // queue is empty so no in-flight command is dropped.
-    while (running_.load(std::memory_order_acquire) || !queue_.empty()) {
+    for (;;) {
         if (queue_.pop(cmd)) {
+            // The shutdown sentinel is ordered behind every prior command in
+            // the FIFO, so reaching it guarantees all real work is done.
+            if (cmd.type == CommandType::Shutdown) {
+                break;
+            }
             apply(cmd);
         } else {
-            // Nothing to do: yield rather than burning a core in a tight spin.
-            // A real exchange might busy-spin for lower latency; we favour
-            // being a good citizen on shared CI hardware.
+            // Empty queue: yield rather than burning a core. A latency-tuned
+            // build would busy-spin with a pause; we favour being a good
+            // citizen on shared CI hardware.
             std::this_thread::yield();
         }
     }
 }
 
 void MatchingEngine::start() {
-    running_.store(true, std::memory_order_release);
     worker_ = std::thread(&MatchingEngine::consume_loop, this);
 }
 
-void MatchingEngine::stop() {
-    running_.store(false, std::memory_order_release);
+void MatchingEngine::join() {
     if (worker_.joinable()) {
         worker_.join();
     }
+}
+
+void MatchingEngine::drain_and_join() {
+    // Push the sentinel (blocking if the queue is momentarily full), then join.
+    while (!queue_.push(Command::make_shutdown())) {
+        std::this_thread::yield();
+    }
+    join();
 }
 
 } // namespace obe
