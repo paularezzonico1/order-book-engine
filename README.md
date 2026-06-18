@@ -6,23 +6,25 @@
 ![sanitizers](https://img.shields.io/badge/ASan%20%7C%20UBSan%20%7C%20TSan-clean-brightgreen.svg)
 ![license](https://img.shields.io/badge/license-MIT-green.svg)
 
-A low-latency **limit order book (LOB) matching engine** in modern C++17, built
-to production-systems standards: a **lock-free threading pipeline**, an
-**allocation-free hot path**, **pre-trade risk controls**, **deterministic
-event-sourced replay**, and a **profiling-driven optimization** pass with
-measured before/after numbers — all backed by 58 tests run under three
-sanitizers.
+A limit order book matching engine, written in C++17.
 
-It implements strict **price-time priority** matching with full/partial fills,
-cancellation, and self-trade prevention; a **free-list memory pool** and an
-**allocation-free open-addressing order index** to keep the hot path off the
-heap; a **lock-free SPSC ring buffer** decoupling an order-generator thread from
-the matching thread; **pre-trade risk controls** (size/notional/fat-finger
-collar/kill switch/duplicate guard); and **event sourcing** — every command is
-journaled to an append-only log and the whole session can be replayed bit-for-
-bit. It ships with a GoogleTest suite (58 tests), a throughput/latency
-benchmark, a parameter sweep, profiling write-ups, a reproducible Docker build,
-and CI that runs the suite under **AddressSanitizer/UBSan and ThreadSanitizer**.
+I started this because I kept reading about how exchanges match orders and
+realized I had no idea how the actual machinery worked — how a book stays sorted
+by price and time, how a cancel finds one order out of millions instantly, how
+you hand orders between threads without locking everything down. The only way I
+was going to understand it was to build one and try to make it fast, so that's
+what this is. It does strict price-time priority matching (full and partial
+fills, cancels, self-trade prevention), and along the way I got pulled into the
+parts that make it actually hold up: keeping the hot path off the heap, handing
+work between threads with a lock-free queue, putting a risk check in front of the
+book, and being able to replay a whole session from a log to prove it's
+deterministic.
+
+I tried not to hand-wave any of it. There's a GoogleTest suite (58 tests), a
+latency/throughput benchmark, a parameter sweep, write-ups of the profiling I
+did, a Docker build so the numbers are reproducible, and CI that runs everything
+under AddressSanitizer/UBSan and ThreadSanitizer — partly because I wanted to be
+sure the lock-free code was actually correct and not just correct on my laptop.
 
 ```
 $ obe_bench --commands 1000000 --depth 20
@@ -54,10 +56,12 @@ ops/sec: ~10.6 million        # after the allocation-free index (see INDEX.md)
   **Release, ASan/UBSan, and TSan**; reproducible **Docker** build; **GitHub
   Actions CI**.
 
-**What it demonstrates:** systems C++ (RAII, custom allocators, intrusive data
-structures), lock-free concurrency and the C++ memory model, data-structure
-selection under real cache/allocation constraints, performance engineering with
-evidence, and trading-domain awareness (risk, recovery, determinism).
+**What I got out of it:** a real feel for systems C++ (RAII, writing my own
+allocator, intrusive data structures), how hard lock-free concurrency and the
+C++ memory model are to get right, why data-structure choice matters once cache
+and allocation are the bottleneck, how to actually measure a change instead of
+guessing, and a much better mental model of how trading systems think about risk,
+recovery, and determinism.
 
 ---
 
