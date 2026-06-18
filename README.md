@@ -6,10 +6,10 @@
 ![sanitizers](https://img.shields.io/badge/ASan%20%7C%20UBSan%20%7C%20TSan-clean-brightgreen.svg)
 ![license](https://img.shields.io/badge/license-MIT-green.svg)
 
-A limit order book matching engine, written in C++17.
+A limit order book matching engine, written in C++.
 
 I started this because I kept reading about how exchanges match orders and
-realized I had no idea how the actual machinery worked — how a book stays sorted
+realized I had no idea how the actual machinery worked. How a book stays sorted
 by price and time, how a cancel finds one order out of millions instantly, how
 you hand orders between threads without locking everything down. The only way I
 was going to understand it was to build one and try to make it fast, so that's
@@ -23,7 +23,7 @@ deterministic.
 I tried not to hand-wave any of it. There's a GoogleTest suite (58 tests), a
 latency/throughput benchmark, a parameter sweep, write-ups of the profiling I
 did, a Docker build so the numbers are reproducible, and CI that runs everything
-under AddressSanitizer/UBSan and ThreadSanitizer — partly because I wanted to be
+under AddressSanitizer/UBSan and ThreadSanitizer, partly because I wanted to be
 sure the lock-free code was actually correct and not just correct on my laptop.
 
 ```
